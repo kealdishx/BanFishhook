@@ -29,8 +29,8 @@ typedef struct nlist nlist_t;
 
 static int8_t stub_helper_section_name[16] = {0x5f, 0x5f, 0x73, 0x74, 0x75, 0x62, 0x5f, 0x68, 0x65, 0x6c, 0x70, 0x65, 0x72, 0x00, 0x00, 0x00};
 static inline void reset_symbol_for_image(const char *symbol, const struct mach_header *header, intptr_t slide);
-static inline void rebind_lazy_symbol(const char *symbol, const struct mach_header *header, intptr_t slide, segment_command_t *text_segment, uintptr_t lazy_bind_info_cmd, uint32_t lazy_bind_info_size);
-
+static inline bool rebind_lazy_symbol(const char *symbol, const struct mach_header *header, intptr_t slide, segment_command_t *text_segment, uintptr_t lazy_bind_info_cmd, uint32_t lazy_bind_info_size);
+static NSArray<NSString *> *get_all_load_dyld(const struct mach_header *header, intptr_t slide);
 
 void reset_symbol(const char *symbol) {
     int32_t count = _dyld_image_count();
@@ -97,20 +97,43 @@ static inline bool rebind_lazy_symbol(const char *symbol, const struct mach_head
             && sectname[12] == stub_helper_section_name[12]) {
             stub_helper_section = cur_section;
             break;
-        }
-        
-        if (!stub_helper_section) {
-            return false;
-        }
-        
-        intptr_t stub_helper_vm_addr = slide + stub_helper_section->addr;
-        
-        if (!stub_helper_vm_addr) {
-            return false;
-        }
-        
-        return true;
+            }
     }
+        
+    if (!stub_helper_section) {
+        return false;
+    }
+    
+    intptr_t stub_helper_vm_addr = slide + stub_helper_section->addr;
+    
+    if (!stub_helper_vm_addr) {
+        return false;
+    }
+    
+    int codeOffset;
+    uintptr_t lazyBindingInfoStart = lazy_bind_info_cmd;
+    uintptr_t lazyBindingInfoEnd = lazy_bind_info_cmd + lazy_bind_info_size;
+    
+    // 5 instructions: code of dyld_stub_binder
+    for (int i = 5; i < stub_helper_section->size / 4; i++) {
+        /*  at C4.4.5 and C6.2.84 of ARM® Architecture Reference Manual
+           ldr w16, #8 (.byte)
+           b stub(br_dyld_stub_binder)
+           .byte: symbol_bindInfo_offset
+        */
+        uintptr_t instruction = stub_helper_vm_addr;
+        uintptr_t ldr = (instruction & ((1 << 8 - 1) << 24)) >> 24;
+        uintptr_t wt = instruction & 31;
+        // #imm `00` sign = false
+        uintptr_t imm19 = (instruction & ((1 << 19 -1) << 5)) >> 5;
+        
+        // ldr w16, #8
+        if (ldr == 0b0011000 && wt == 16 && (imm19 << 2) == 8) {
+            
+        }
+    }
+    
+    return true;
     
 }
 
@@ -124,6 +147,22 @@ static bool get_library_ordinal(uint16_t value, int *result) {
     return false;
 }
 
-static void get_all_load_dyld(const struct mach_header *header, intptr_t slide) {
+static NSArray<NSString *> *get_all_load_dyld(const struct mach_header *header, intptr_t slide) {
+    NSMutableArray<NSString *> *allLoadDyldArr = @[].mutableCopy;
+    uintptr_t cur_cmd = (uintptr_t)header + sizeof(mach_header_t);
+    if (!cur_cmd) {
+        return allLoadDyldArr;
+    }
     
+    segment_command_t *cur_seg_cmd;
+    for (uint i = 0; i < header->ncmds; i++, cur_cmd += cur_seg_cmd->cmdsize) {
+        cur_seg_cmd = (segment_command_t *)cur_cmd;
+        if (cur_seg_cmd->cmd == LC_LOAD_DYLIB
+            || cur_seg_cmd->cmd == LC_LOAD_WEAK_DYLIB
+            || cur_seg_cmd->cmd == LC_REEXPORT_DYLIB) {
+            NSString *segname = [NSString stringWithCString:cur_seg_cmd->segname encoding:NSUTF8StringEncoding];
+            [allLoadDyldArr addObject:segname];
+        }
+    }
+    return allLoadDyldArr;
 }
